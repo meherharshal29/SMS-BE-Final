@@ -1,115 +1,89 @@
 const cloudinary = require('cloudinary').v2;
-const pool = require('../config/db');
+const Camera = require('../models/cameraModel');
+const CameraImage = require('../models/cameraImageModel');
 
-// Configure Cloudinary
 cloudinary.config({
     cloud_name: process.env.CLOUD_NAME,
     api_key: process.env.CLOUD_API_KEY,
     api_secret: process.env.CLOUD_API_SECRET
 });
 
-// 1. ADD CAMERA
+// Add Camera
 exports.addCamera = async (req, res) => {
     try {
         const { model_name, brand, price_per_day, description, images } = req.body;
-        const files = req.files;
+        const camera = await Camera.create({ model_name, brand, price_per_day, description });
 
-        const [camera] = await pool.execute(
-            "INSERT INTO cameras (model_name, brand, price_per_day, description) VALUES (?, ?, ?, ?)",
-            [model_name, brand, price_per_day, description]
-        );
-        const cameraId = camera.insertId;
-
-        // Handle JSON Links
-        if (images && Array.isArray(images)) {
-            const linkQueries = images.map(url => 
-                pool.execute("INSERT INTO camera_images (camera_id, image_url, cloudinary_id) VALUES (?, ?, ?)", [cameraId, url, null])
+        let imageData = [];
+        // Scenario A: Physical files (Postman form-data)
+        if (req.files && req.files.length > 0) {
+            const uploadPromises = req.files.map(file => 
+                cloudinary.uploader.upload(file.path, { folder: "camera_rentals" })
             );
-            await Promise.all(linkQueries);
-            return res.status(201).json({ message: "Added with links!", cameraId });
-        }
-
-        // Handle File Uploads
-        if (files && files.length > 0) {
-            const uploadPromises = files.map(file => cloudinary.uploader.upload(file.path, {
-                folder: "camera_rentals",
-                transformation: [{ width: 1000, quality: "auto", fetch_format: "auto" }]
-            }));
             const results = await Promise.all(uploadPromises);
-            const imageQueries = results.map(result => 
-                pool.execute("INSERT INTO camera_images (camera_id, image_url, cloudinary_id) VALUES (?, ?, ?)", 
-                [cameraId, result.secure_url, result.public_id])
-            );
-            await Promise.all(imageQueries);
-            return res.status(201).json({ message: "Added with files!", cameraId });
+            imageData = results.map(result => ({
+                camera_id: camera.id,
+                image_url: result.secure_url,
+                cloudinary_id: result.public_id
+            }));
+        } 
+        // Scenario B: URLs in JSON (Postman raw JSON)
+        else if (images && Array.isArray(images)) {
+            imageData = images.map(img => ({
+                camera_id: camera.id,
+                image_url: img.image_url || img, // Handles both object and string arrays
+                cloudinary_id: null
+            }));
         }
-        res.status(400).json({ error: "No images provided" });
+
+        if (imageData.length > 0) await CameraImage.bulkCreate(imageData);
+
+        const fullCamera = await Camera.findByPk(camera.id, {
+            include: [{ model: CameraImage, as: 'images', attributes: ['image_url'] }]
+        });
+        res.status(201).json(fullCamera);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 };
 
-// 2. GET ALL CAMERAS
+// Get All (Optimized for fast loading)
 exports.getAllCameras = async (req, res) => {
     try {
-        const [rows] = await pool.execute(`
-            SELECT c.*, GROUP_CONCAT(ci.image_url) as all_images 
-            FROM cameras c 
-            LEFT JOIN camera_images ci ON c.id = ci.camera_id 
-            GROUP BY c.id
-        `);
-
-        // Serialize data: Convert string of URLs into a clean Array
-        const serializedData = rows.map(row => ({
-            ...row,
-            images: row.all_images ? row.all_images.split(',') : []
-        }));
-
-        res.json(serializedData);
+        const cameras = await Camera.findAll({
+            include: [{ model: CameraImage, as: 'images', attributes: ['image_url'] }],
+            order: [['createdAt', 'DESC']]
+        });
+        res.status(200).json(cameras);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 };
 
-// 3. GET BY ID (FIXED & FULL)
+// Get By ID
 exports.getCameraById = async (req, res) => {
     try {
-        const cameraId = req.params.id;
-        
-        // Get Camera Data
-        const [camera] = await pool.execute("SELECT * FROM cameras WHERE id = ?", [cameraId]);
-        
-        if (camera.length === 0) {
-            return res.status(404).json({ error: "Camera not found" });
-        }
-
-        // Get Associated Images
-        const [images] = await pool.execute("SELECT image_url, cloudinary_id FROM camera_images WHERE camera_id = ?", [cameraId]);
-
-        res.json({
-            ...camera[0],
-            images: images
+        const camera = await Camera.findByPk(req.params.id, {
+            include: [{ model: CameraImage, as: 'images', attributes: ['image_url'] }]
         });
+        if (!camera) return res.status(404).json({ error: "Not found" });
+        res.status(200).json(camera);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 };
 
-// 4. DELETE CAMERA
+// Delete
 exports.deleteCamera = async (req, res) => {
     try {
-        const cameraId = req.params.id;
+        const camera = await Camera.findByPk(req.params.id, { include: [{ model: CameraImage, as: 'images' }] });
+        if (!camera) return res.status(404).json({ error: "Not found" });
 
-        // Optional: Delete from Cloudinary first if IDs exist
-        const [images] = await pool.execute("SELECT cloudinary_id FROM camera_images WHERE camera_id = ?", [cameraId]);
-        for (const img of images) {
-            if (img.cloudinary_id) {
-                await cloudinary.uploader.destroy(img.cloudinary_id);
-            }
+        for (const img of camera.images) {
+            if (img.cloudinary_id) await cloudinary.uploader.destroy(img.cloudinary_id);
         }
-
-        await pool.execute("DELETE FROM cameras WHERE id = ?", [cameraId]);
-        res.json({ message: "Camera and associated images deleted successfully" });
+        await camera.destroy();
+        res.json({ message: "Deleted" });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

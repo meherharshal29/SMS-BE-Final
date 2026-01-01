@@ -16,10 +16,15 @@
     "cloudinary": "^2.8.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
-    "express": "^4.19.2",
+    "express": "^4.22.1",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.3",
     "multer": "^1.4.5-lts.1",
+    "multer-storage-cloudinary": "^4.0.0",
     "mysql2": "^3.16.0",
-    "razorpay": "^2.9.6"
+    "nodemailer": "^7.0.12",
+    "razorpay": "^2.9.6",
+    "sequelize": "^6.37.7"
   },
   "devDependencies": {
     "nodemon": "^3.1.11"
